@@ -18,6 +18,7 @@ import functools
 import inspect
 import os
 import warnings
+from tqdm import tqdm
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -133,7 +134,7 @@ ALL_CACHE_NAMES = [
 ]
 
 GENERATION_MODES_MAPPING = {
-    GenerationMode.SAMPLE: "_sample",
+    GenerationMode.SAMPLE: "_sample_klcl",
     GenerationMode.GREEDY_SEARCH: "_sample",
     GenerationMode.BEAM_SEARCH: "_beam_search",
     GenerationMode.BEAM_SAMPLE: "_beam_search",
@@ -3093,14 +3094,16 @@ class GenerationMixin(ContinuousMixin):
             # pre-process distribution
             next_token_scores = logits_processor(input_ids, next_token_logits)
 
+            # keep raw logits for KLCL
+            if raw_logits is None:
+                raw_logits = outputs.logits
+            else:
+                raw_logits = torch.cat((raw_logits, outputs.logits), dim=1)
+
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
                 if output_scores:
                     scores += (next_token_scores,)
-                if raw_logits is None:
-                    raw_logits = outputs.logits
-                else:
-                    raw_logits = torch.cat((raw_logits, outputs.logits), dim=1)
                 if output_attentions:
                     decoder_attentions += (
                         (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
@@ -3117,32 +3120,32 @@ class GenerationMixin(ContinuousMixin):
 
             klcl_max_len = 128
             klcl_window_len = 64
-            klcl_steps = 5
-            klcl_learning_rate = 1e-4
+            klcl_steps = 50
+            klcl_learning_rate = 1e-5
             # Check length of KV cache to determine to perform KLCL
             kv_cache_len = outputs.past_key_values.get_seq_length() if outputs.past_key_values is not None else 0
-            if kv_cache_len > klcl_max_len:
-                torch.enable_grad()
-                klcl_optimizer = torch.optim.AdamW(self.parameters(), lr=klcl_learning_rate)
-                for i in range(klcl_steps):
-                    # Crop input_ids to last klcl_window_len tokens
-                    klcl_input_ids = input_ids[:, -klcl_window_len:]
-                    # Remove KV cache from model_kwargs to force recomputation
-                    klcl_model_kwargs = {k: v for k, v in model_kwargs.items() if k not in ALL_CACHE_NAMES}
-                    # Forward pass with cropped context
-                    klcl_model_inputs = self.prepare_inputs_for_generation(klcl_input_ids, **klcl_model_kwargs)
-                    klcl_outputs = self(**klcl_model_inputs, return_dict=True)
-                    klcl_loss = nn.functional.kl_div(
-                        nn.functional.log_softmax(klcl_outputs.logits, dim=-1),
-                        nn.functional.softmax(raw_logits.detach()[:, -klcl_window_len:], dim=-1),
-                    )
-                    klcl_optimizer.zero_grad()
-                    klcl_loss.backward()
-                    klcl_optimizer.step()
+            if kv_cache_len >= klcl_max_len:
+                with torch.enable_grad():
+                    klcl_optimizer = torch.optim.AdamW(self.parameters(), lr=klcl_learning_rate)
+                    for i in (bar := tqdm(range(klcl_steps))):
+                        # Crop input_ids to last klcl_window_len tokens
+                        klcl_input_ids = input_ids[:, -klcl_window_len:]
+                        # Remove KV cache from model_kwargs to force recomputation
+                        klcl_model_kwargs = {k: v for k, v in model_kwargs.items() if k not in ALL_CACHE_NAMES}
+                        # Forward pass with cropped context
+                        klcl_model_inputs = self.prepare_inputs_for_generation(klcl_input_ids, **klcl_model_kwargs)
+                        klcl_outputs = self(**klcl_model_inputs, return_dict=True)
+                        klcl_loss = nn.functional.kl_div(
+                            nn.functional.log_softmax(klcl_outputs.logits, dim=-1),
+                            nn.functional.softmax(raw_logits.detach()[:, -klcl_window_len:], dim=-1),
+                        )
+                        klcl_optimizer.zero_grad()
+                        klcl_loss.backward()
+                        klcl_optimizer.step()
+                        bar.set_description(f"KLCL loss: {klcl_loss.item():.8f} at step {i+1}/{klcl_steps} at length {cur_len} with kv_cache_len {kv_cache_len}")
 
                 # After optimization, crop KV cache to only keep recent tokens
                 model_kwargs['past_key_values'] = model_kwargs['past_key_values'].crop(klcl_window_len)
-                torch.no_grad()
 
             # token selection
             if do_sample:
