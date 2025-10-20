@@ -3201,8 +3201,6 @@ class GenerationMixin(ContinuousMixin):
         else:
             return input_ids
         
-    def _crop_kv_cache 
-
     @staticmethod
     def _flatten_beam_dim(tensor: torch.Tensor) -> torch.Tensor:
         """[batch_size, num_beams, ...] -> [batch_size * num_beams, ...]"""
