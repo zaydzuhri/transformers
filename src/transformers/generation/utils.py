@@ -3138,6 +3138,7 @@ class GenerationMixin(ContinuousMixin):
                         klcl_loss = nn.functional.kl_div(
                             nn.functional.log_softmax(klcl_outputs.logits, dim=-1),
                             nn.functional.softmax(raw_logits.detach()[:, -klcl_window_len:], dim=-1),
+                            reduction="batchmean"
                         )
                         klcl_optimizer.zero_grad()
                         klcl_loss.backward()
@@ -3145,7 +3146,7 @@ class GenerationMixin(ContinuousMixin):
                         bar.set_description(f"KLCL loss: {klcl_loss.item():.8f} at step {i+1}/{klcl_steps} at length {cur_len} with kv_cache_len {kv_cache_len}")
 
                 # After optimization, crop KV cache to only keep recent tokens
-                model_kwargs['past_key_values'] = model_kwargs['past_key_values'].crop(klcl_window_len)
+                model_kwargs['past_key_values'].crop(klcl_window_len)
 
             # token selection
             if do_sample:
