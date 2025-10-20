@@ -3120,8 +3120,8 @@ class GenerationMixin(ContinuousMixin):
 
             klcl_max_len = 128
             klcl_window_len = 64
-            klcl_steps = 50
-            klcl_learning_rate = 1e-5
+            klcl_steps = 20
+            klcl_learning_rate = 1e-7
             # Check length of KV cache to determine to perform KLCL
             kv_cache_len = outputs.past_key_values.get_seq_length() if outputs.past_key_values is not None else 0
             if kv_cache_len >= klcl_max_len:
@@ -3138,8 +3138,9 @@ class GenerationMixin(ContinuousMixin):
                         klcl_loss = nn.functional.kl_div(
                             nn.functional.log_softmax(klcl_outputs.logits, dim=-1),
                             nn.functional.softmax(raw_logits.detach()[:, -klcl_window_len:], dim=-1),
-                            reduction="batchmean"
+                            reduction="mean"
                         )
+                        # Optimize
                         klcl_optimizer.zero_grad()
                         klcl_loss.backward()
                         klcl_optimizer.step()
